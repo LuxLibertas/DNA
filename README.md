@@ -10,6 +10,9 @@ offline once loaded. No LLM/AI is involved anywhere.
 | **Alphabetical** | 2-bit mapping `00→A 01→C 10→G 11→T` (Erlich & Zielinski, *Science* 2017, DNA Fountain) | 2 | 200 nt |
 | **Church** | `0→A/C`, `1→T/G`, never repeating the previous base (Church, Gao & Kosuri, *Science* 2012) | 1 | 400 nt |
 
+**New here?** Read the [user manual](manual.md) — it explains both encodings with worked examples and
+states exactly what is (and is not) faithful to the source papers.
+
 > Educational & experimental use only. The tools are provided “as is”, without warranty. Outputs
 > should be independently verified and should not be relied upon as a substitute for professional
 > judgement. You use the tools at your own discretion and risk.
