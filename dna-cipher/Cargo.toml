@@ -1,0 +1,36 @@
+[package]
+name = "dna-cipher"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+description = "Deterministic bit-to-nucleotide cipher (Alphabetical / DNA Fountain and Church 2012 schemes), exposed to the browser via WebAssembly."
+license = "MIT"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "=0.2.128"
+
+[dev-dependencies]
+proptest = "=1.11.0"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+indexing_slicing = "deny"
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+
+[package.metadata.wasm-pack.profile.release]
+# The module is a few KB; skip the extra binaryen download wasm-opt would need.
+wasm-opt = false
