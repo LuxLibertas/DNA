@@ -4,3 +4,4 @@ export function injectPolicy(html: string, policy: string): string;
 export function stripPolicy(html: string): string;
 export function injectDirectory(dir: string): number;
 export function htmlFiles(dir: string): Generator<string>;
+export const TARGETS: ReadonlyArray<{ dir: string; label: string; required: boolean; warnIfMissing?: boolean }>;

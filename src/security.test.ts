@@ -5,7 +5,7 @@ import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, wr
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { describe, expect, it } from "vitest";
-import { buildPolicy, injectDirectory, injectPolicy, inlineScriptHashes, stripPolicy } from "../scripts/inject-csp.mjs";
+import { TARGETS, buildPolicy, injectDirectory, injectPolicy, inlineScriptHashes, stripPolicy } from "../scripts/inject-csp.mjs";
 import { HISTORY_KEY } from "@/lib/storage/history";
 import { SETTINGS_KEY, SETTINGS_VERSION } from "@/lib/storage/settings";
 
@@ -202,5 +202,21 @@ describe("CSP injection over a build directory (out/ and .next/server/app/)", ()
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe("CSP injection targets", () => {
+  const targets = TARGETS.map((target) => relative(root, target.dir).replaceAll("\\", "/"));
+
+  it("covers every place a host can serve built pages from", () => {
+    // out/ = static export; .next/server/app = prerender; .next/output/static = what Vercel's
+    // Next.js adapter writes DURING `next build` (production served this copy, unpatched, once).
+    expect(targets).toEqual(
+      expect.arrayContaining(["out", ".next/server/app", ".next/output/static", ".vercel/output/static"]),
+    );
+  });
+
+  it("requires only the static export", () => {
+    expect(TARGETS.filter((target) => target.required).map((target) => target.label)).toEqual(["out/"]);
   });
 });

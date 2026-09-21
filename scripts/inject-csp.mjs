@@ -5,9 +5,15 @@
 // exactly those. Directives a <meta> cannot carry (frame-ancestors) are set as real
 // headers in vercel.json.
 //
-// Two copies of each page exist after `next build`: the static export in ./out, and
-// Next's prerendered HTML in ./.next/server/app. Some hosts (Vercel's Next.js builder in
-// production, observed) serve the latter, so BOTH are patched; the script is idempotent.
+// Several copies of each page exist after `next build`, and which one a host serves varies:
+//   out/                     the static export (what `next start`-less hosts and our tests use)
+//   .next/server/app/        Next's prerendered HTML
+//   .next/output/static/     written DURING `next build` by Vercel's Next.js adapter when the
+//                            platform enables it (NEXT_ENABLE_ADAPTER=1); Vercel then moves it to
+//                            .vercel/output/static. This is what production served, because the
+//                            copy was made before this post-build script ran.
+//   .vercel/output/static/   the moved copy, in case a host has already relocated it
+// All present copies are patched; the script is idempotent.
 import { createHash } from "node:crypto";
 import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -15,7 +21,15 @@ import { fileURLToPath } from "node:url";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const outDir = join(root, "out");
-const prerenderDir = join(root, ".next", "server", "app");
+
+/** Where built pages can live. Only `out/` is mandatory; the others exist depending on host/adapter. */
+export const TARGETS = [
+  { dir: outDir, label: "out/", required: true },
+  { dir: join(root, ".next", "server", "app"), label: ".next/server/app/", required: false, warnIfMissing: true },
+  // Vercel's Next.js adapter copies pages here during `next build` (it later becomes .vercel/output).
+  { dir: join(root, ".next", "output", "static"), label: ".next/output/static/", required: false },
+  { dir: join(root, ".vercel", "output", "static"), label: ".vercel/output/static/", required: false },
+];
 
 export function* htmlFiles(dir) {
   for (const name of readdirSync(dir)) {
@@ -100,16 +114,17 @@ export function injectDirectory(dir) {
 }
 
 function main() {
-  const exported = injectDirectory(outDir);
-  if (exported === 0) throw new Error(`No .html files found in ${outDir}. Did \`next build\` run?`);
-  console.log(`CSP: injected into ${exported} page(s) in out/.`);
-
-  if (existsSync(prerenderDir)) {
-    console.log(`CSP: injected into ${injectDirectory(prerenderDir)} prerendered page(s) in .next/server/app/.`);
-  } else {
-    // Not fatal (Next's internal layout may change), but say so: a host serving this copy
-    // would ship pages without the script policy.
-    console.warn(`CSP: WARNING ${prerenderDir} not found; prerendered copies were NOT patched.`);
+  for (const { dir, label, required, warnIfMissing } of TARGETS) {
+    if (!existsSync(dir)) {
+      if (required) throw new Error(`${label} not found. Did \`next build\` run?`);
+      // Not fatal (layouts vary by host and Next version), but a host serving that copy
+      // would ship pages without the script policy, so make the gap visible.
+      if (warnIfMissing) console.warn(`CSP: WARNING ${label} not found; that copy was NOT patched.`);
+      continue;
+    }
+    const count = injectDirectory(dir);
+    if (count === 0 && required) throw new Error(`No .html files found in ${label}. Did \`next build\` run?`);
+    console.log(`CSP: injected into ${count} page(s) in ${label}`);
   }
 }
 
