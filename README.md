@@ -182,9 +182,14 @@ Re-run with `npm audit` and `cd dna-cipher && cargo audit` before each release.
 
 ## Deploying to Vercel (static export)
 
-The repo is ready as-is: `vercel.json` sets the build command (`npm run build`) and output directory
-(`out`). Import the GitHub repo in Vercel (Framework preset: Next.js) and deploy; no environment
-variables, no Rust toolchain, and no server functions are needed. From the CLI you would run
+The repo is ready as-is: `vercel.json` sets the build command (`npm run build`, which runs
+`next build` and then injects the CSP). Import the GitHub repo in Vercel (Framework preset: Next.js)
+and deploy; no environment variables, no Rust toolchain, and no server functions are needed.
+
+**Do not set an "Output Directory"** — neither in the dashboard nor as `outputDirectory` in
+`vercel.json`. For a Next.js static export Vercel detects `out/` itself; the setting is only for a
+custom `distDir`, and overriding it makes the build fail with *"The file …/out/routes-manifest.json
+couldn't be found"* (`routes-manifest.json` is written to `.next/`). A test guards this. From the CLI you would run
 `vercel` (preview) or `vercel --prod` yourself. Any other static host works by serving `out/`
 (serve `.wasm` as `application/wasm`).
 
