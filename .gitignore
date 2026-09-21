@@ -27,3 +27,6 @@ Thumbs.db
 .vscode/
 .idea/
 *.log
+
+# vercel cli local state
+.vercel/
