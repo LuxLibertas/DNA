@@ -158,6 +158,12 @@ is delivered two ways:
 
    `'wasm-unsafe-eval'` is what allows WebAssembly to compile; it does **not** permit JS `eval`.
    `connect-src 'self'` covers fetching the app's own `.wasm`. There is no `unsafe-inline`.
+
+   The script patches **both** copies of each page that `next build` produces: the static export in
+   `out/` and Next's prerendered HTML in `.next/server/app/`. The first Vercel deployment served pages without the policy `<meta>` even though `out/` had it
+   (its HTML matched Next's prerendered copy), so both copies are now patched. It is idempotent, and it fails the build if any
+   inline script in a page is not covered by that page's own policy.
+
 2. **`vercel.json`** adds real response headers: `Content-Security-Policy: frame-ancestors 'none'`
    (unsupported in `<meta>`), `X-Content-Type-Options`, `Referrer-Policy: no-referrer`,
    `Cross-Origin-Opener-Policy`, `Permissions-Policy`, HSTS, and immutable caching for hashed assets.

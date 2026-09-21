@@ -1,18 +1,23 @@
-// Post-build step: adds a strict Content-Security-Policy <meta> to every page in ./out.
+// Post-build step: adds a strict Content-Security-Policy <meta> to every built page.
 //
 // Next's static export inlines small bootstrap <script>s whose content changes per
 // build, so instead of allowing 'unsafe-inline' we hash each inline script and allow
 // exactly those. Directives a <meta> cannot carry (frame-ancestors) are set as real
 // headers in vercel.json.
+//
+// Two copies of each page exist after `next build`: the static export in ./out, and
+// Next's prerendered HTML in ./.next/server/app. Some hosts (Vercel's Next.js builder in
+// production, observed) serve the latter, so BOTH are patched; the script is idempotent.
 import { createHash } from "node:crypto";
-import { readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const outDir = join(root, "out");
+const prerenderDir = join(root, ".next", "server", "app");
 
-function* htmlFiles(dir) {
+export function* htmlFiles(dir) {
   for (const name of readdirSync(dir)) {
     const path = join(dir, name);
     if (statSync(path).isDirectory()) yield* htmlFiles(path);
@@ -62,15 +67,50 @@ export function injectPolicy(html, policy) {
   return html.slice(0, at) + tag + html.slice(at);
 }
 
-function main() {
+const POLICY_META = /<meta http-equiv="Content-Security-Policy"[^>]*\/?>/gi;
+
+/** Removes any CSP <meta> this script added earlier, so re-running recomputes instead of failing. */
+export function stripPolicy(html) {
+  return html.replace(POLICY_META, "");
+}
+
+/** The policy string carried by the page's CSP <meta>, or null. */
+function embeddedPolicy(html) {
+  const match = /<meta http-equiv="Content-Security-Policy" content="([^"]*)"/i.exec(html);
+  return match ? match[1].replaceAll("&quot;", '"') : null;
+}
+
+/**
+ * Injects a per-page policy into every .html file under `dir` and verifies the result:
+ * every inline script in the written page must be allowed by the page's own policy.
+ * Returns the number of files patched.
+ */
+export function injectDirectory(dir) {
   let count = 0;
-  for (const file of htmlFiles(outDir)) {
-    const html = readFileSync(file, "utf8");
-    writeFileSync(file, injectPolicy(html, buildPolicy(inlineScriptHashes(html))));
+  for (const file of htmlFiles(dir)) {
+    const clean = stripPolicy(readFileSync(file, "utf8"));
+    const patched = injectPolicy(clean, buildPolicy(inlineScriptHashes(clean)));
+    const policy = embeddedPolicy(patched);
+    const missing = inlineScriptHashes(patched).filter((hash) => !policy?.includes(hash));
+    if (missing.length > 0) throw new Error(`${file}: inline script not covered by CSP: ${missing}`);
+    writeFileSync(file, patched);
     count += 1;
   }
-  if (count === 0) throw new Error(`No .html files found in ${outDir}. Did \`next build\` run?`);
-  console.log(`CSP: injected into ${count} page(s).`);
+  return count;
+}
+
+function main() {
+  const exported = injectDirectory(outDir);
+  if (exported === 0) throw new Error(`No .html files found in ${outDir}. Did \`next build\` run?`);
+  console.log(`CSP: injected into ${exported} page(s) in out/.`);
+
+  if (existsSync(prerenderDir)) {
+    console.log(`CSP: injected into ${injectDirectory(prerenderDir)} prerendered page(s) in .next/server/app/.`);
+  } else {
+    // Not fatal (Next's internal layout may change), but say so: a host serving this copy
+    // would ship pages without the script policy.
+    console.warn(`CSP: WARNING ${prerenderDir} not found; prerendered copies were NOT patched.`);
+  }
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) main();

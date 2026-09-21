@@ -1,10 +1,11 @@
 // Static guards for the security requirements. They fail the build if someone
 // (or a framework upgrade) reintroduces a forbidden pattern.
 import { createHash } from "node:crypto";
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { describe, expect, it } from "vitest";
-import { buildPolicy, injectPolicy, inlineScriptHashes } from "../scripts/inject-csp.mjs";
+import { buildPolicy, injectDirectory, injectPolicy, inlineScriptHashes, stripPolicy } from "../scripts/inject-csp.mjs";
 import { HISTORY_KEY } from "@/lib/storage/history";
 import { SETTINGS_KEY, SETTINGS_VERSION } from "@/lib/storage/settings";
 
@@ -126,5 +127,80 @@ describe("CSP post-build script", () => {
     );
     expect(() => injectPolicy(out, "x")).toThrow(/already contains/);
     expect(() => injectPolicy("<html><head></head></html>", "x")).toThrow(/charSet/);
+  });
+});
+
+describe("CSP injection over a build directory (out/ and .next/server/app/)", () => {
+  const page = (script: string) =>
+    `<!DOCTYPE html><html><head><meta charSet="utf-8"/><title>t</title></head><body>` +
+    `<script src="/a.js" async></script><script>${script}</script></body></html>`;
+
+  const makeTree = () => {
+    const dir = mkdtempSync(join(tmpdir(), "csp-"));
+    mkdirSync(join(dir, "nested"));
+    writeFileSync(join(dir, "index.html"), page("self.a=1"));
+    writeFileSync(join(dir, "nested", "deep.html"), page("self.b=2"));
+    writeFileSync(join(dir, "ignore.txt"), "not html");
+    return dir;
+  };
+  const metaCount = (html: string) => (html.match(/http-equiv="Content-Security-Policy"/g) ?? []).length;
+
+  it("patches every html file recursively, each with a policy covering its own inline scripts", () => {
+    const dir = makeTree();
+    try {
+      expect(injectDirectory(dir)).toBe(2);
+      for (const [file, script] of [["index.html", "self.a=1"], ["nested/deep.html", "self.b=2"]] as const) {
+        const html = readFileSync(join(dir, file), "utf8");
+        expect(metaCount(html)).toBe(1);
+        expect(html).toContain(`'sha256-${createHash("sha256").update(script).digest("base64")}'`);
+      }
+      expect(readFileSync(join(dir, "ignore.txt"), "utf8")).toBe("not html");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("is idempotent: running twice yields identical files with a single meta", () => {
+    const dir = makeTree();
+    try {
+      injectDirectory(dir);
+      const once = readFileSync(join(dir, "index.html"), "utf8");
+      injectDirectory(dir);
+      const twice = readFileSync(join(dir, "index.html"), "utf8");
+      expect(twice).toBe(once);
+      expect(metaCount(twice)).toBe(1);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("recomputes hashes if a page's inline script changed since an earlier run", () => {
+    const dir = makeTree();
+    try {
+      injectDirectory(dir);
+      const first = readFileSync(join(dir, "index.html"), "utf8");
+      writeFileSync(join(dir, "index.html"), first.replace("self.a=1", "self.a=999"));
+      injectDirectory(dir);
+      const html = readFileSync(join(dir, "index.html"), "utf8");
+      expect(html).toContain(`'sha256-${createHash("sha256").update("self.a=999").digest("base64")}'`);
+      expect(html).not.toContain(`'sha256-${createHash("sha256").update("self.a=1").digest("base64")}'`);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("stripPolicy removes only the CSP meta", () => {
+    const patched = injectPolicy(page("x"), "default-src 'none'");
+    expect(metaCount(patched)).toBe(1);
+    expect(stripPolicy(patched)).toBe(page("x"));
+  });
+
+  it("reports zero when a directory has no html (so main() can fail loudly)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "csp-empty-"));
+    try {
+      expect(injectDirectory(dir)).toBe(0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
