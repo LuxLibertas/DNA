@@ -13,7 +13,10 @@ import { describe, expect, it } from "vitest";
 const root = process.cwd();
 const read = (file: string) => readFileSync(join(root, file), "utf8");
 const vercel = JSON.parse(read("vercel.json")) as Record<string, unknown>;
-const pkg = JSON.parse(read("package.json")) as { scripts: Record<string, string> };
+const pkg = JSON.parse(read("package.json")) as {
+  scripts: Record<string, string>;
+  engines: Record<string, string>;
+};
 
 describe("vercel.json", () => {
   it("pins the Output Directory to Next's default distDir (.next), never to the export folder", () => {
@@ -31,5 +34,11 @@ describe("vercel.json", () => {
 
   it("keeps a static export (no server runtime needed on Vercel)", () => {
     expect(read("next.config.ts")).toMatch(/output:\s*["']export["']/);
+  });
+});
+
+describe("package.json", () => {
+  it("pins the Node major, so a redeploy cannot change it (an open range lets Vercel pick)", () => {
+    expect(pkg.engines.node).toBe("24.x");
   });
 });
