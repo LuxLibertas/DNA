@@ -14,6 +14,9 @@
 //                            copy was made before this post-build script ran.
 //   .vercel/output/static/   the moved copy, in case a host has already relocated it
 // All present copies are patched; the script is idempotent.
+//
+// The build then fails if a page could ship without a valid policy: every copy is read back and
+// checked, and on Vercel the adapter's copy must exist, because a page there is what gets served.
 import { createHash } from "node:crypto";
 import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -27,15 +30,21 @@ export const TARGETS = [
   { dir: outDir, label: "out/", required: true },
   { dir: join(root, ".next", "server", "app"), label: ".next/server/app/", required: false, warnIfMissing: true },
   // Vercel's Next.js adapter copies pages here during `next build` (it later becomes .vercel/output).
-  { dir: join(root, ".next", "output", "static"), label: ".next/output/static/", required: false },
-  { dir: join(root, ".vercel", "output", "static"), label: ".vercel/output/static/", required: false },
+  { dir: join(root, ".next", "output", "static"), label: ".next/output/static/", required: false, vercelOutput: true },
+  { dir: join(root, ".vercel", "output", "static"), label: ".vercel/output/static/", required: false, vercelOutput: true },
 ];
 
-export function* htmlFiles(dir) {
+function* allFiles(dir) {
   for (const name of readdirSync(dir)) {
     const path = join(dir, name);
-    if (statSync(path).isDirectory()) yield* htmlFiles(path);
-    else if (name.endsWith(".html")) yield path;
+    if (statSync(path).isDirectory()) yield* allFiles(path);
+    else yield path;
+  }
+}
+
+export function* htmlFiles(dir) {
+  for (const path of allFiles(dir)) {
+    if (path.endsWith(".html")) yield path;
   }
 }
 
@@ -94,6 +103,12 @@ function embeddedPolicy(html) {
   return match ? match[1].replaceAll("&quot;", '"') : null;
 }
 
+/** Inline scripts in `html` that the page's own policy does not allow. */
+function uncoveredScripts(html) {
+  const policy = embeddedPolicy(html);
+  return inlineScriptHashes(html).filter((hash) => !policy?.includes(hash));
+}
+
 /**
  * Injects a per-page policy into every .html file under `dir` and verifies the result:
  * every inline script in the written page must be allowed by the page's own policy.
@@ -104,8 +119,7 @@ export function injectDirectory(dir) {
   for (const file of htmlFiles(dir)) {
     const clean = stripPolicy(readFileSync(file, "utf8"));
     const patched = injectPolicy(clean, buildPolicy(inlineScriptHashes(clean)));
-    const policy = embeddedPolicy(patched);
-    const missing = inlineScriptHashes(patched).filter((hash) => !policy?.includes(hash));
+    const missing = uncoveredScripts(patched);
     if (missing.length > 0) throw new Error(`${file}: inline script not covered by CSP: ${missing}`);
     writeFileSync(file, patched);
     count += 1;
@@ -113,19 +127,58 @@ export function injectDirectory(dir) {
   return count;
 }
 
-function main() {
-  for (const { dir, label, required, warnIfMissing } of TARGETS) {
+const PAGE_START = /^\s*<(!doctype html|html)\b/i;
+
+/**
+ * Reads everything under `dir` back from disk and returns one message per page that lacks a valid
+ * policy. Pages are recognised by content as well as by name, so this also catches a page the
+ * injector skipped because it has no .html extension.
+ */
+export function verifyDirectory(dir) {
+  const problems = [];
+  for (const file of allFiles(dir)) {
+    const bytes = readFileSync(file);
+    if (!file.endsWith(".html") && !PAGE_START.test(bytes.subarray(0, 64).toString("latin1"))) continue;
+    const html = bytes.toString("utf8");
+    if (embeddedPolicy(html) === null) {
+      problems.push(`${file}: no CSP meta`);
+      continue;
+    }
+    const missing = uncoveredScripts(html);
+    if (missing.length > 0) problems.push(`${file}: inline script not covered by CSP: ${missing}`);
+  }
+  return problems;
+}
+
+/** Patches and verifies every target, throwing if a page could ship without a valid policy. */
+export function injectAllTargets(targets, env, logger = console) {
+  const problems = [];
+  let vercelOutputPages = 0;
+  for (const { dir, label, required, warnIfMissing, vercelOutput } of targets) {
     if (!existsSync(dir)) {
       if (required) throw new Error(`${label} not found. Did \`next build\` run?`);
       // Not fatal (layouts vary by host and Next version), but a host serving that copy
       // would ship pages without the script policy, so make the gap visible.
-      if (warnIfMissing) console.warn(`CSP: WARNING ${label} not found; that copy was NOT patched.`);
+      if (warnIfMissing) logger.warn(`CSP: WARNING ${label} not found; that copy was NOT patched.`);
       continue;
     }
     const count = injectDirectory(dir);
     if (count === 0 && required) throw new Error(`No .html files found in ${label}. Did \`next build\` run?`);
-    console.log(`CSP: injected into ${count} page(s) in ${label}`);
+    logger.log(`CSP: injected into ${count} page(s) in ${label}`);
+    if (vercelOutput) vercelOutputPages += count;
+    problems.push(...verifyDirectory(dir));
+  }
+  if (problems.length > 0) {
+    throw new Error(`CSP: pages would ship without a valid policy:\n${problems.join("\n")}`);
+  }
+  if (env.VERCEL === "1" && vercelOutputPages === 0) {
+    const labels = targets.filter((target) => target.vercelOutput).map((target) => target.label);
+    throw new Error(
+      `CSP: building on Vercel, but no pages found in the adapter's output (${labels.join(", ")}). ` +
+        "Vercel serves that copy, so production could lose its script policy. If Next or Vercel moved it, " +
+        "add the new location to TARGETS. For a local `vercel build`, set NEXT_ENABLE_ADAPTER=1.",
+    );
   }
 }
 
-if (process.argv[1] === fileURLToPath(import.meta.url)) main();
+if (process.argv[1] === fileURLToPath(import.meta.url)) injectAllTargets(TARGETS, process.env);

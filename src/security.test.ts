@@ -5,7 +5,16 @@ import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, wr
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { describe, expect, it } from "vitest";
-import { TARGETS, buildPolicy, injectDirectory, injectPolicy, inlineScriptHashes, stripPolicy } from "../scripts/inject-csp.mjs";
+import {
+  TARGETS,
+  buildPolicy,
+  injectDirectory,
+  injectPolicy,
+  inlineScriptHashes,
+  injectAllTargets,
+  stripPolicy,
+  verifyDirectory,
+} from "../scripts/inject-csp.mjs";
 import { HISTORY_KEY } from "@/lib/storage/history";
 import { SETTINGS_KEY, SETTINGS_VERSION } from "@/lib/storage/settings";
 
@@ -218,5 +227,122 @@ describe("CSP injection targets", () => {
 
   it("requires only the static export", () => {
     expect(TARGETS.filter((target) => target.required).map((target) => target.label)).toEqual(["out/"]);
+  });
+
+  it("treats the adapter's copies as Vercel's served output", () => {
+    expect(TARGETS.filter((target) => target.vercelOutput).map((target) => target.label)).toEqual([
+      ".next/output/static/",
+      ".vercel/output/static/",
+    ]);
+  });
+});
+
+describe("CSP read-back verification", () => {
+  const unpatched = `<!DOCTYPE html><html><head><meta charSet="utf-8"/></head><body><script>self.a=1</script></body></html>`;
+  const withTree = (run: (dir: string) => void) => {
+    const dir = mkdtempSync(join(tmpdir(), "csp-verify-"));
+    try {
+      run(dir);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  };
+
+  it("passes pages whose policy covers their inline scripts, and ignores non-pages", () => {
+    withTree((dir) => {
+      writeFileSync(join(dir, "index.html"), unpatched);
+      writeFileSync(join(dir, "index.rsc"), "1:not a page");
+      writeFileSync(join(dir, "module.wasm"), Buffer.from([0, 97, 115, 109, 1, 0, 0, 0]));
+      injectDirectory(dir);
+      expect(verifyDirectory(dir)).toEqual([]);
+    });
+  });
+
+  it("reports a page with no CSP meta", () => {
+    withTree((dir) => {
+      writeFileSync(join(dir, "index.html"), unpatched);
+      expect(verifyDirectory(dir)).toEqual([expect.stringMatching(/index\.html: no CSP meta/)]);
+    });
+  });
+
+  it("reports an inline script the page's policy does not cover", () => {
+    withTree((dir) => {
+      writeFileSync(join(dir, "index.html"), unpatched);
+      injectDirectory(dir);
+      const patched = readFileSync(join(dir, "index.html"), "utf8");
+      writeFileSync(join(dir, "index.html"), patched.replace("self.a=1", "self.a=2"));
+      expect(verifyDirectory(dir)).toEqual([expect.stringMatching(/index\.html: inline script not covered/)]);
+    });
+  });
+
+  it("finds a page without an .html extension, which the injector would have skipped", () => {
+    withTree((dir) => {
+      writeFileSync(join(dir, "index.html"), unpatched);
+      writeFileSync(join(dir, "about"), unpatched);
+      injectDirectory(dir);
+      expect(verifyDirectory(dir)).toEqual([expect.stringMatching(/about: no CSP meta/)]);
+    });
+  });
+});
+
+describe("CSP build gate", () => {
+  const page = `<!DOCTYPE html><html><head><meta charSet="utf-8"/></head><body><script>self.a=1</script></body></html>`;
+  const quiet = { log: () => {}, warn: () => {} };
+
+  /** Builds targets under a temp root; `pages` lists the directories that get an index.html. */
+  const withTargets = (pages: string[], run: (targets: typeof TARGETS) => void) => {
+    const base = mkdtempSync(join(tmpdir(), "csp-gate-"));
+    try {
+      for (const name of pages) {
+        mkdirSync(join(base, name), { recursive: true });
+        writeFileSync(join(base, name, "index.html"), page);
+      }
+      run([
+        { dir: join(base, "out"), label: "out/", required: true },
+        { dir: join(base, "adapter"), label: "adapter/", required: false, vercelOutput: true },
+        { dir: join(base, "moved"), label: "moved/", required: false, vercelOutput: true },
+      ]);
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  };
+
+  it("fails on Vercel when the adapter's output is missing", () => {
+    withTargets(["out"], (targets) => {
+      expect(() => injectAllTargets(targets, { VERCEL: "1" }, quiet)).toThrow(/Vercel.*adapter/s);
+    });
+  });
+
+  it("fails on Vercel when the adapter's output exists but holds no pages", () => {
+    withTargets(["out"], (targets) => {
+      const adapter = targets.find((target) => target.label === "adapter/");
+      mkdirSync(adapter?.dir ?? "", { recursive: true });
+      expect(() => injectAllTargets(targets, { VERCEL: "1" }, quiet)).toThrow(/Vercel.*adapter/s);
+    });
+  });
+
+  it.each([["adapter"], ["moved"]])("passes on Vercel when the pages are in %s/", (dir) => {
+    withTargets(["out", dir], (targets) => {
+      expect(() => injectAllTargets(targets, { VERCEL: "1" }, quiet)).not.toThrow();
+    });
+  });
+
+  it("does not require the adapter's output off Vercel", () => {
+    withTargets(["out"], (targets) => {
+      expect(() => injectAllTargets(targets, {}, quiet)).not.toThrow();
+    });
+  });
+
+  it("still fails anywhere when the static export is missing", () => {
+    withTargets([], (targets) => {
+      expect(() => injectAllTargets(targets, {}, quiet)).toThrow(/out\/ not found/);
+    });
+  });
+
+  it("fails when a page the injector cannot see has no CSP", () => {
+    withTargets(["out"], (targets) => {
+      writeFileSync(join(targets[0]?.dir ?? "", "about"), page);
+      expect(() => injectAllTargets(targets, {}, quiet)).toThrow(/about: no CSP meta/);
+    });
   });
 });
