@@ -19,7 +19,8 @@ states exactly what is (and is not) faithful to the source papers.
 
 ## Quick start
 
-Prerequisites: Node ≥ 20.9 (developed on 24). Rust + `wasm-pack` are only needed if you change the
+Prerequisites: Node 24 (pinned in `package.json`, so Vercel builds on the same major and a redeploy
+cannot change it). Rust + `wasm-pack` are only needed if you change the
 cipher (the built WASM is committed — see [Design decisions](#design-decisions)).
 
 ```bash
@@ -166,8 +167,14 @@ is delivered two ways:
    `.next/output/static/` *during* `next build`, and Vercel later turns that folder into
    `.vercel/output`. The first deployment therefore served pages without the policy `<meta>` even
    though `out/` had it; this was reproduced locally with `vercel build` and that variable set.
-   The script is idempotent, and fails the build if any inline script in a page is not covered by
-   that page's own policy.
+   The script is idempotent. After patching, it reads every copy back and fails the build if:
+
+   * any page has no policy `<meta>`, or an inline script its own policy does not cover (pages are
+     recognised by content as well as by name, so one without an `.html` extension is caught too);
+   * the build runs on Vercel (`VERCEL=1`) and neither `.next/output/static/` nor
+     `.vercel/output/static/` holds any pages. If Next or Vercel moves that folder, the build stops
+     rather than shipping pages with only the `frame-ancestors` header. A local `vercel build` needs
+     `NEXT_ENABLE_ADAPTER=1` to pass this check.
 
 2. **`vercel.json`** adds real response headers: `Content-Security-Policy: frame-ancestors 'none'`
    (unsupported in `<meta>`), `X-Content-Type-Options`, `Referrer-Policy: no-referrer`,
@@ -178,18 +185,27 @@ header (compute the script hashes from your build, or reuse the ones in `out/ind
 
 ### Audit results
 
-Last run 2026-09-20:
+Last run 2026-11-05, after upgrading to Next 16.4.5:
 
-* `npm audit` (all dependencies, incl. dev) — **0 vulnerabilities**.
+* `npm audit --omit=dev` (what the build ships from) — **0 vulnerabilities**.
+* `npm audit` (all dependencies, incl. dev) — **8 moderate, all one accepted issue**:
+  [GHSA-g3hv-75wg-m249](https://github.com/advisories/GHSA-g3hv-75wg-m249), a denial of service in
+  `minimatch`, reported once for it and once for each `typescript-eslint` / `eslint-config-next`
+  package that depends on it. It is dev-only, used by the linter on this repo's own files, and
+  `typescript-eslint`'s latest release (8.72.1) still requires the affected `minimatch` 10. Do not
+  run `npm audit fix --force`: it downgrades `eslint-config-next` to 15.5.29. Revisit when
+  `typescript-eslint` moves to `minimatch` 11.
 * `cargo audit` (RustSec, 47 crates in `Cargo.lock`) — **no advisories**. The code that ships in the
   WASM depends only on `wasm-bindgen` and its macro crates; `proptest` (and its `rand`/`tempfile`
   tree) is a dev-dependency.
 * `npm ls`: no invalid/missing peers. Two "extraneous" entries (`@emnapi/runtime`,
   `@img/sharp-wasm32`) are optional `sharp` binaries pulled in by Next; the app never uses image
   optimisation.
-* Known-behind-latest on purpose: TypeScript 7 and ESLint 10 (see Design decisions).
+* Known-behind-latest on purpose: TypeScript 7 and ESLint 10 (see Design decisions). npm now marks
+  ESLint 9 as no longer supported, so this needs revisiting.
 
-Re-run with `npm audit` and `cd dna-cipher && cargo audit` before each release.
+Nothing runs these automatically, and the site redeploys on every push to `main`. Re-run with
+`npm audit` and `cd dna-cipher && cargo audit` before each release.
 
 ## Deploying to Vercel (static export)
 
